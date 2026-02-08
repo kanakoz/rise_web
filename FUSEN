@@ -8,13 +8,12 @@ import {
   updateDoc, 
   deleteDoc, 
   doc, 
-  query, 
-  orderBy 
+  query 
 } from 'firebase/firestore';
 import { 
   getAuth, 
   signInAnonymously, 
-  signInWithCustomToken, 
+  signInWithCustomToken,
   onAuthStateChanged 
 } from 'firebase/auth';
 import { 
@@ -37,28 +36,54 @@ import {
   UserPlus
 } from 'lucide-react';
 
-// --- Firebase Configuration ---
-const firebaseConfig = JSON.parse(__firebase_config);
+/**
+ * --- Firebase Configuration ---
+ * 現在の環境（ES2015）でのビルドエラーを避けるため、
+ * import.meta.env の直接参照を避け、安全な取得ロジックに変更しました。
+ */
+const getFirebaseConfig = () => {
+  // 1. プレビュー環境用のグローバル変数を優先的に使用
+  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+    try {
+      return JSON.parse(__firebase_config);
+    } catch (e) {
+      console.error("Failed to parse __firebase_config", e);
+    }
+  }
+
+  // 2. 本番環境（Vite / GitHub Pagesなど）
+  // ローカル開発やGitHub Pagesでのビルド時は、以下のオブジェクトに
+  // Firebaseのコンソールから取得した値を直接設定してください。
+  return {
+    apiKey: "", // ここに設定値を記入
+    authDomain: "",
+    projectId: "",
+    storageBucket: "",
+    messagingSenderId: "",
+    appId: ""
+  };
+};
+
+const firebaseConfig = getFirebaseConfig();
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'web-review-app-v2';
+
+// アプリケーション識別子（Firestore内のパスに使用）
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'web-review-pro-v2';
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [notes, setNotes] = useState([]);
   const [members, setMembers] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState('list'); // 'list', 'visual', 'members'
+  const [viewMode, setViewMode] = useState('list');
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [currentReviewUrl, setCurrentReviewUrl] = useState('');
   
-  // Member Management State
   const [newMemberName, setNewMemberName] = useState('');
-
-  // Overlay click tracking
   const [pendingCoords, setPendingCoords] = useState(null);
   const previewRef = useRef(null);
 
@@ -71,6 +96,7 @@ export default function App() {
     posY: null
   });
 
+  // 1. 認証の初期化 (RULE 3)
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -80,7 +106,7 @@ export default function App() {
           await signInAnonymously(auth);
         }
       } catch (error) {
-        console.error("Auth failed", error);
+        console.error("Auth initialization failed:", error);
       }
     };
     initAuth();
@@ -88,37 +114,38 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Fetch Notes and Members
+  // 2. データのリアルタイム取得 (RULE 1, RULE 2)
   useEffect(() => {
     if (!user) return;
 
-    // Notes Subscription
+    // パス: /artifacts/{appId}/public/data/{collectionName}
     const notesRef = collection(db, 'artifacts', appId, 'public', 'data', 'stickyNotes');
     const unsubscribeNotes = onSnapshot(query(notesRef), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       data.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
       setNotes(data);
       setLoading(false);
+    }, (err) => {
+      console.error("Notes snapshot error:", err);
+      setLoading(false);
     });
 
-    // Members Subscription
     const membersRef = collection(db, 'artifacts', appId, 'public', 'data', 'teamMembers');
     const unsubscribeMembers = onSnapshot(query(membersRef), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       data.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
       setMembers(data);
-    });
+    }, (err) => console.error("Members snapshot error:", err));
 
     return () => {
       unsubscribeNotes();
       unsubscribeMembers();
     };
-  }, [user]);
+  }, [user, appId]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!formData.url || !formData.content) return;
-
+    if (!user || !formData.url || !formData.content) return;
     try {
       const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'stickyNotes');
       await addDoc(collectionRef, {
@@ -131,36 +158,36 @@ export default function App() {
       setPendingCoords(null);
       setIsFormOpen(false);
     } catch (error) {
-      console.error("Error adding note:", error);
+      console.error("Submit error:", error);
     }
   };
 
   const handleAddMember = async (e) => {
     e.preventDefault();
-    if (!newMemberName.trim()) return;
+    if (!user || !newMemberName.trim()) return;
     try {
       const membersRef = collection(db, 'artifacts', appId, 'public', 'data', 'teamMembers');
-      await addDoc(membersRef, {
-        name: newMemberName.trim(),
-        createdAt: Date.now()
-      });
+      await addDoc(membersRef, { name: newMemberName.trim(), createdAt: Date.now() });
       setNewMemberName('');
     } catch (error) {
-      console.error("Error adding member:", error);
+      console.error("Add member error:", error);
     }
   };
 
   const deleteMember = async (id) => {
+    if (!user) return;
     const memberRef = doc(db, 'artifacts', appId, 'public', 'data', 'teamMembers', id);
     await deleteDoc(memberRef);
   };
 
   const toggleStatus = async (note) => {
+    if (!user) return;
     const noteRef = doc(db, 'artifacts', appId, 'public', 'data', 'stickyNotes', note.id);
     await updateDoc(noteRef, { status: note.status === 'open' ? 'resolved' : 'open' });
   };
 
   const deleteNote = async (id) => {
+    if (!user) return;
     const noteRef = doc(db, 'artifacts', appId, 'public', 'data', 'stickyNotes', id);
     await deleteDoc(noteRef);
   };
@@ -170,38 +197,46 @@ export default function App() {
     const rect = previewRef.current.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * 100;
     const y = ((e.clientY - rect.top) / rect.height) * 100;
-    
     setPendingCoords({ x, y });
     setFormData(prev => ({ ...prev, posX: x, posY: y, url: currentReviewUrl }));
     setIsFormOpen(true);
   };
 
   const filteredNotes = notes.filter(note => {
-    const matchesSearch = note.url.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          note.content.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesSearch = (note.url || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
+                          (note.content || '').toLowerCase().includes(searchTerm.toLowerCase());
     const matchesStatus = filterStatus === 'all' || note.status === filterStatus;
     const matchesUrl = viewMode === 'visual' ? (note.url === currentReviewUrl) : true;
     return matchesSearch && matchesStatus && matchesUrl;
   });
 
-  if (!user) return <div className="flex items-center justify-center h-screen"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>;
+  if (!user) return (
+    <div className="flex items-center justify-center h-screen bg-slate-50">
+      <div className="text-center">
+        <div className="w-16 h-16 mx-auto mb-6 relative">
+          <div className="absolute inset-0 rounded-full border-4 border-slate-200"></div>
+          <div className="absolute inset-0 rounded-full border-4 border-t-blue-600 animate-spin"></div>
+        </div>
+        <p className="text-slate-400 font-bold text-xs uppercase tracking-widest">Authentication in Progress</p>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
-      {/* Header */}
-      <header className="bg-white border-b sticky top-0 z-40 shadow-sm">
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-100">
+      <header className="bg-white/80 backdrop-blur-md border-b sticky top-0 z-40 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 py-3 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="bg-blue-600 p-2 rounded-xl text-white">
+            <div className="bg-blue-600 p-2.5 rounded-2xl text-white shadow-lg shadow-blue-100">
               <MapPin className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-lg font-bold leading-tight">Site Reviewer</h1>
-              <p className="text-[10px] text-slate-400 font-mono">ID: {user.uid.substring(0, 8)}</p>
+              <h1 className="text-xl font-black tracking-tight">Web Review <span className="text-blue-600">Pro</span></h1>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Sync Active</span>
             </div>
           </div>
 
-          <div className="flex bg-slate-100 p-1 rounded-xl">
+          <nav className="flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200/50">
             {[
               { id: 'list', icon: ListIcon, label: '一覧' },
               { id: 'visual', icon: Eye, label: 'ビジュアル' },
@@ -210,20 +245,20 @@ export default function App() {
               <button 
                 key={tab.id}
                 onClick={() => setViewMode(tab.id)}
-                className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${viewMode === tab.id ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500'}`}
+                className={`flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-bold transition-all duration-200 ${viewMode === tab.id ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}
               >
                 <tab.icon className="w-4 h-4" /> {tab.label}
               </button>
             ))}
-          </div>
+          </nav>
 
-          <div className="flex items-center gap-2 w-full md:w-auto">
-            <div className="relative flex-1 md:w-64">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+          <div className="flex items-center gap-3 w-full md:w-auto">
+            <div className="relative flex-1 md:w-72">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
               <input 
                 type="text" 
-                placeholder="内容で検索..." 
-                className="w-full pl-9 pr-4 py-2 bg-slate-50 border rounded-full text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="内容・URLを検索..." 
+                className="w-full pl-11 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-full text-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
@@ -234,7 +269,7 @@ export default function App() {
                 setFormData(prev => ({ ...prev, posX: null, posY: null }));
                 setIsFormOpen(true);
               }}
-              className="bg-blue-600 text-white p-2 rounded-full hover:bg-blue-700 transition-colors shadow-lg shadow-blue-200"
+              className="bg-blue-600 text-white p-2.5 rounded-full hover:bg-blue-700 transition-all shadow-xl shadow-blue-200 active:scale-90"
             >
               <PlusCircle className="w-6 h-6" />
             </button>
@@ -242,125 +277,129 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto p-4 md:p-6">
+      <main className="max-w-7xl mx-auto p-4 md:p-8">
         {viewMode === 'list' && (
-          <div className="space-y-6">
-            <div className="flex gap-2 p-1 bg-slate-200/50 rounded-xl w-fit">
-              {['all', 'open', 'resolved'].map(s => (
-                <button
-                  key={s}
-                  onClick={() => setFilterStatus(s)}
-                  className={`px-4 py-1 rounded-lg text-xs font-bold transition-all ${filterStatus === s ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
-                >
-                  {s === 'all' ? 'すべて' : s === 'open' ? '未対応' : '解決済み'}
-                </button>
-              ))}
+          <div className="space-y-8 animate-in fade-in duration-500">
+            <div className="flex items-center justify-between">
+              <div className="flex gap-2 p-1 bg-slate-200/40 rounded-xl w-fit">
+                {['all', 'open', 'resolved'].map(s => (
+                  <button
+                    key={s}
+                    onClick={() => setFilterStatus(s)}
+                    className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all ${filterStatus === s ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                  >
+                    {s === 'all' ? 'すべて' : s === 'open' ? '未対応' : '解決済み'}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filteredNotes.map((note) => (
-                <div key={note.id} className={`group bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-xl transition-all ${note.status === 'resolved' ? 'opacity-60' : ''}`}>
-                  <div className="p-5">
-                    <div className="flex justify-between items-start mb-3">
-                      <div className="flex flex-col gap-1 overflow-hidden">
-                        <div className="flex items-center gap-2">
-                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${note.posX !== null ? 'bg-orange-100 text-orange-600' : 'bg-slate-100 text-slate-500'}`}>
-                            {note.posX !== null ? '位置指定あり' : '汎用'}
-                          </span>
-                          <a href={note.url} target="_blank" className="text-xs text-blue-600 font-medium truncate flex items-center gap-1 hover:underline">
-                            <ExternalLink className="w-3 h-3" /> {note.url}
-                          </a>
+            {loading ? (
+               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                  {[1, 2, 3].map(i => <div key={i} className="h-56 bg-white border rounded-3xl animate-pulse" />)}
+               </div>
+            ) : filteredNotes.length === 0 ? (
+              <div className="text-center py-32 bg-white rounded-[3rem] border-2 border-dashed border-slate-100">
+                <MessageSquare className="w-12 h-12 mx-auto mb-4 opacity-10" />
+                <h3 className="text-lg font-bold text-slate-700">付箋が見つかりません</h3>
+                <p className="text-sm text-slate-400 mt-1">新しい修正指示を追加しましょう</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                {filteredNotes.map((note) => (
+                  <div key={note.id} className={`group bg-white rounded-3xl border border-slate-200/60 overflow-hidden hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 ${note.status === 'resolved' ? 'opacity-60 grayscale' : ''}`}>
+                    <div className="p-6">
+                      <div className="flex justify-between items-start mb-5">
+                        <div className="flex flex-col gap-2 overflow-hidden">
+                          <div className="flex items-center gap-2">
+                            <div className={`w-2 h-2 rounded-full ${note.posX !== null ? 'bg-orange-500' : 'bg-blue-500'}`}></div>
+                            <a href={note.url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 font-black truncate hover:underline flex items-center gap-1">
+                              {note.url} <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </div>
+                          <span className="text-[10px] text-slate-400 font-bold uppercase">{new Date(note.createdAt).toLocaleString('ja-JP')}</span>
                         </div>
-                        <span className="text-[10px] text-slate-400">{new Date(note.createdAt).toLocaleString()}</span>
+                        <button onClick={() => toggleStatus(note)} className={`p-2 rounded-xl transition-all ${note.status === 'resolved' ? 'bg-green-100 text-green-600' : 'bg-slate-50 text-slate-300 hover:bg-blue-50 hover:text-blue-600'}`}>
+                          {note.status === 'resolved' ? <CheckCircle2 className="w-6 h-6" /> : <Circle className="w-6 h-6" />}
+                        </button>
                       </div>
-                      <button onClick={() => toggleStatus(note)} className={`p-1.5 rounded-full transition-colors ${note.status === 'resolved' ? 'bg-green-100 text-green-600' : 'bg-slate-100 text-slate-300 hover:text-blue-500'}`}>
-                        {note.status === 'resolved' ? <CheckCircle2 className="w-5 h-5" /> : <Circle className="w-5 h-5" />}
-                      </button>
-                    </div>
-                    <p className={`text-sm font-medium leading-relaxed mb-4 whitespace-pre-wrap ${note.status === 'resolved' ? 'line-through text-slate-400' : 'text-slate-700'}`}>
-                      {note.content}
-                    </p>
-                    <div className="flex items-center justify-between pt-4 border-t border-slate-50">
-                      <div className="flex items-center gap-3">
-                        <div className="flex flex-col">
-                          <span className="text-[9px] text-slate-400 font-bold uppercase">担当</span>
-                          <span className="text-xs font-bold">{note.assignee || '-'}</span>
+                      <p className={`text-[15px] font-semibold leading-relaxed mb-6 whitespace-pre-wrap min-h-[4rem] ${note.status === 'resolved' ? 'line-through text-slate-400' : 'text-slate-800'}`}>
+                        {note.content}
+                      </p>
+                      <div className="flex items-center justify-between pt-5 border-t border-slate-50">
+                        <div className="flex items-center gap-4">
+                          <div className="flex flex-col">
+                            <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest mb-1">担当者</span>
+                            <span className="text-xs font-extrabold text-slate-700">{note.assignee || '未設定'}</span>
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest mb-1">通知先</span>
+                            <span className="text-xs font-extrabold text-slate-700">{note.notifyTo || '未設定'}</span>
+                          </div>
                         </div>
-                        <div className="flex flex-col">
-                          <span className="text-[9px] text-slate-400 font-bold uppercase">通知</span>
-                          <span className="text-xs font-bold">{note.notifyTo || '-'}</span>
-                        </div>
+                        <button onClick={() => deleteNote(note.id)} className="text-slate-200 hover:text-red-500 transition-colors p-2 rounded-lg opacity-0 group-hover:opacity-100">
+                          <Trash2 className="w-5 h-5" />
+                        </button>
                       </div>
-                      <button onClick={() => deleteNote(note.id)} className="text-slate-300 hover:text-red-500 transition-colors p-1">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
                     </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
         {viewMode === 'visual' && (
-          <div className="flex flex-col gap-4">
-            <div className="bg-white p-4 rounded-2xl border shadow-sm flex flex-col md:flex-row items-center gap-4">
-              <div className="flex-1 w-full">
+          <div className="flex flex-col gap-6 animate-in fade-in zoom-in-95 duration-500">
+            <div className="bg-white p-6 rounded-3xl border border-slate-200/60 shadow-xl shadow-slate-200/50 flex flex-col md:flex-row items-center gap-4">
+              <div className="flex-1 w-full relative">
+                <Layout className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-5 h-5" />
                 <input 
                   type="text" 
-                  placeholder="修正したいサイトのURLを入力 (例: https://example.com)"
-                  className="w-full px-4 py-2 border rounded-xl bg-slate-50 outline-none focus:ring-2 focus:ring-blue-500 text-sm font-medium"
+                  placeholder="プレビューするサイトのURLを入力 (https://...)"
+                  className="w-full pl-12 pr-4 py-3.5 border border-slate-200 rounded-2xl bg-slate-50 outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 text-sm font-bold transition-all"
                   value={currentReviewUrl}
                   onChange={(e) => setCurrentReviewUrl(e.target.value)}
                 />
               </div>
-              <div className="flex items-center gap-4 text-xs text-slate-500 font-medium">
-                <div className="flex items-center gap-1"><Info className="w-3 h-3 text-blue-500" /> 画面内をクリックして付箋を配置（解決済みは非表示）</div>
+              <div className="flex items-center gap-3 text-xs text-blue-700 bg-blue-50/80 px-5 py-3 rounded-2xl font-black border border-blue-100">
+                 <Info className="w-5 h-5" /> 画面内を直接クリックしてピンを立てる
               </div>
             </div>
 
-            <div className="relative w-full aspect-video bg-white border rounded-3xl overflow-hidden shadow-2xl">
+            <div className="relative w-full aspect-video bg-slate-200/50 border-4 border-white rounded-[3rem] overflow-hidden shadow-2xl ring-1 ring-slate-200 group">
               {!currentReviewUrl ? (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-300">
-                  <Layout className="w-16 h-16 mb-4 opacity-20" />
-                  <p className="font-bold">URLを入力してプレビューを開始してください</p>
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-300 p-8 text-center">
+                  <Eye className="w-16 h-16 mb-6 opacity-10" />
+                  <h4 className="text-xl font-black text-slate-400">Preview Mode Ready</h4>
+                  <p className="max-w-xs mt-2 text-sm font-medium">URLを入力するとサイトが読み込まれます。</p>
                 </div>
               ) : (
                 <>
-                  <iframe 
-                    src={currentReviewUrl} 
-                    className="w-full h-full pointer-events-none" 
-                    title="Site Preview"
-                  />
-                  {/* Click Overlay */}
-                  <div 
-                    ref={previewRef}
-                    onClick={handlePreviewClick}
-                    className="absolute inset-0 z-10 cursor-crosshair"
-                  >
+                  <iframe src={currentReviewUrl} className="w-full h-full pointer-events-none bg-white" title="Preview" />
+                  <div ref={previewRef} onClick={handlePreviewClick} className="absolute inset-0 z-10 cursor-crosshair">
                     {filteredNotes.filter(n => n.posX !== null && n.status !== 'resolved').map((note, idx) => (
                       <div 
                         key={note.id}
-                        className={`absolute -translate-x-1/2 -translate-y-1/2 group z-20`}
+                        className="absolute -translate-x-1/2 -translate-y-1/2 group z-20"
                         style={{ left: `${note.posX}%`, top: `${note.posY}%` }}
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-lg transition-transform hover:scale-125 bg-orange-500`}>
+                        <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-black text-white shadow-2xl bg-orange-500 border-2 border-white transition-all hover:scale-125">
                           {idx + 1}
                         </div>
-                        <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 w-48 bg-slate-900/90 text-white p-2 rounded-lg text-[10px] opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-pre-wrap shadow-xl backdrop-blur-sm">
-                          <div className="font-bold mb-1">担当: {note.assignee || '未設定'}</div>
+                        <div className="absolute top-full mt-3 left-1/2 -translate-x-1/2 w-56 bg-slate-900/95 text-white p-4 rounded-2xl text-[13px] opacity-0 group-hover:opacity-100 transition-all pointer-events-none whitespace-pre-wrap shadow-2xl backdrop-blur-md transform origin-top translate-y-2 group-hover:translate-y-0">
+                          <div className="font-black border-b border-white/10 pb-2 mb-2 text-orange-400">PIC: {note.assignee || '未設定'}</div>
                           {note.content}
                         </div>
                       </div>
                     ))}
-                    
                     {pendingCoords && (
                       <div 
-                        className="absolute -translate-x-1/2 -translate-y-1/2 w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center text-white animate-pulse z-30 shadow-lg border-2 border-white"
+                        className="absolute -translate-x-1/2 -translate-y-1/2 w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center text-white animate-pulse z-30 shadow-lg border-2 border-white"
                         style={{ left: `${pendingCoords.x}%`, top: `${pendingCoords.y}%` }}
                       >
-                        <PlusCircle className="w-4 h-4" />
+                        <PlusCircle className="w-5 h-5" />
                       </div>
                     )}
                   </div>
@@ -371,151 +410,100 @@ export default function App() {
         )}
 
         {viewMode === 'members' && (
-          <div className="max-w-2xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
-            <div className="bg-white p-8 rounded-[2.5rem] border shadow-sm">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="bg-blue-100 p-2 rounded-xl text-blue-600">
-                  <UserPlus className="w-6 h-6" />
+          <div className="max-w-3xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-500">
+            <div className="bg-white p-10 rounded-[3.5rem] border border-slate-200/60 shadow-2xl shadow-slate-200/50">
+              <div className="flex items-center gap-4 mb-10">
+                <div className="bg-blue-600 p-4 rounded-3xl text-white shadow-xl shadow-blue-200">
+                  <UserPlus className="w-8 h-8" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-bold">メンバー管理</h2>
-                  <p className="text-xs text-slate-400">付箋の担当者として選択できる名前を登録します。</p>
+                  <h2 className="text-2xl font-black tracking-tight">Team Management</h2>
+                  <p className="text-slate-400 font-bold text-sm">メンバーを登録・管理します</p>
                 </div>
               </div>
-
-              <form onSubmit={handleAddMember} className="flex gap-3 mb-8">
+              
+              <form onSubmit={handleAddMember} className="flex gap-4 mb-12">
                 <input 
                   type="text" 
-                  placeholder="メンバーの名前を入力"
-                  className="flex-1 px-4 py-3 bg-slate-50 border rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium"
+                  placeholder="メンバーの名前を追加"
+                  className="flex-1 px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 font-bold transition-all"
                   value={newMemberName}
                   onChange={(e) => setNewMemberName(e.target.value)}
                 />
-                <button 
-                  type="submit"
-                  className="bg-blue-600 text-white px-6 py-3 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-100 active:scale-95"
-                >
-                  追加
-                </button>
+                <button type="submit" className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-black shadow-2xl shadow-blue-200 hover:bg-blue-700 transition-all active:scale-95">ADD</button>
               </form>
 
-              <div className="space-y-3">
-                <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-2">登録済みメンバー ({members.length})</h3>
-                {members.length === 0 ? (
-                  <div className="text-center py-10 bg-slate-50 rounded-2xl border border-dashed text-slate-400 text-sm">
-                    メンバーが登録されていません
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {members.map(member => (
-                      <div key={member.id} className="flex items-center justify-between p-4 bg-white border rounded-2xl group hover:border-blue-200 transition-all">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 bg-slate-100 rounded-full flex items-center justify-center text-xs font-bold text-slate-500">
-                            {member.name.charAt(0)}
-                          </div>
-                          <span className="font-bold text-slate-700">{member.name}</span>
-                        </div>
-                        <button 
-                          onClick={() => deleteMember(member.id)}
-                          className="text-slate-300 hover:text-red-500 p-1 transition-colors"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+                {members.map(member => (
+                  <div key={member.id} className="flex items-center justify-between p-5 bg-slate-50/50 border-2 border-transparent rounded-[2rem] hover:border-blue-500/30 hover:bg-white transition-all group">
+                    <div className="flex items-center gap-4">
+                      <div className="w-10 h-10 rounded-2xl bg-blue-100 flex items-center justify-center text-blue-600 font-black text-lg">
+                        {member.name?.charAt(0)}
                       </div>
-                    ))}
+                      <span className="font-black text-slate-700">{member.name}</span>
+                    </div>
+                    <button onClick={() => deleteMember(member.id)} className="text-slate-200 hover:text-red-500 p-2 opacity-0 group-hover:opacity-100 transition-all">
+                      <Trash2 className="w-5 h-5" />
+                    </button>
                   </div>
-                )}
+                ))}
               </div>
-            </div>
-            
-            <div className="bg-blue-50 p-6 rounded-[2rem] border border-blue-100 flex items-start gap-4">
-              <Info className="w-5 h-5 text-blue-500 mt-1 flex-shrink-0" />
-              <p className="text-sm text-blue-700 leading-relaxed">
-                ここで登録したメンバーは、付箋を作成する際の<strong>「担当者」</strong>および<strong>「お知らせ相手」</strong>の選択肢に表示されます。チーム全員の名前を追加しておきましょう。
-              </p>
             </div>
           </div>
         )}
       </main>
 
-      {/* Modal Form */}
+      {/* 付箋登録モーダル */}
       {isFormOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setIsFormOpen(false)} />
-          <div className="relative bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className={`p-8 text-white ${formData.posX !== null ? 'bg-orange-500' : 'bg-blue-600'}`}>
+          <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-xl animate-in fade-in duration-500" onClick={() => setIsFormOpen(false)} />
+          <div className="relative bg-white w-full max-w-xl rounded-[3rem] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300">
+            <div className={`p-10 text-white ${formData.posX !== null ? 'bg-gradient-to-r from-orange-500 to-amber-500' : 'bg-gradient-to-r from-blue-600 to-indigo-600'}`}>
               <div className="flex justify-between items-start">
-                <div>
-                  <h2 className="text-2xl font-bold">付箋を追加</h2>
-                  <p className="text-white/80 text-sm mt-1">
-                    {formData.posX !== null ? '座標を指定して修正指示を作成します' : '修正内容を入力してください'}
-                  </p>
+                <div className="flex items-center gap-4">
+                   <MessageSquare className="w-7 h-7" />
+                   <div>
+                      <h2 className="text-2xl font-black tracking-tighter">新しく付箋を貼る</h2>
+                      <p className="text-white/70 text-sm font-bold mt-1">チームに共有する修正指示を入力</p>
+                   </div>
                 </div>
-                <button onClick={() => setIsFormOpen(false)} className="bg-white/10 hover:bg-white/20 p-2 rounded-full transition-colors">
-                  <X className="w-5 h-5" />
+                <button onClick={() => setIsFormOpen(false)} className="bg-white/10 hover:bg-white/20 p-2 rounded-2xl transition-all">
+                  <X className="w-6 h-6" />
                 </button>
               </div>
             </div>
             
-            <form onSubmit={handleSubmit} className="p-8 space-y-5">
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-widest">対象URL</label>
-                <input 
-                  required
-                  type="text" 
-                  placeholder="https://example.com"
-                  className="w-full px-4 py-3 bg-slate-50 border rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-medium"
-                  value={formData.url}
-                  onChange={e => setFormData({...formData, url: e.target.value})}
-                />
+            <form onSubmit={handleSubmit} className="p-10 space-y-6">
+              <div className="space-y-1">
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">URL</label>
+                <input required type="text" placeholder="https://..." className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold" value={formData.url} onChange={e => setFormData({...formData, url: e.target.value})} />
+              </div>
+              
+              <div className="space-y-1">
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">修正指示</label>
+                <textarea required rows="4" placeholder="修正箇所の詳細や指示を入力..." className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none resize-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold" value={formData.content} onChange={e => setFormData({...formData, content: e.target.value})} />
               </div>
 
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-widest">修正内容</label>
-                <textarea 
-                  autoFocus
-                  required
-                  rows="4"
-                  placeholder="例: このボタンの色をもう少し明るくしてください"
-                  className="w-full px-4 py-3 bg-slate-50 border rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all resize-none text-sm font-medium"
-                  value={formData.content}
-                  onChange={e => setFormData({...formData, content: e.target.value})}
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-widest">担当者</label>
-                  <select 
-                    className="w-full px-4 py-3 bg-slate-50 border rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-medium appearance-none"
-                    value={formData.assignee}
-                    onChange={e => setFormData({...formData, assignee: e.target.value})}
-                  >
-                    <option value="">選択してください</option>
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-1">
+                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">担当者</label>
+                  <select className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all appearance-none font-bold" value={formData.assignee} onChange={e => setFormData({...formData, assignee: e.target.value})}>
+                    <option value="">担当者を選択</option>
                     {members.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
                   </select>
                 </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-widest">お知らせ相手</label>
-                  <select 
-                    className="w-full px-4 py-3 bg-slate-50 border rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-medium appearance-none"
-                    value={formData.notifyTo}
-                    onChange={e => setFormData({...formData, notifyTo: e.target.value})}
-                  >
-                    <option value="">選択してください</option>
+                <div className="space-y-1">
+                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest pl-1">お知らせ相手</label>
+                  <select className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all appearance-none font-bold" value={formData.notifyTo} onChange={e => setFormData({...formData, notifyTo: e.target.value})}>
+                    <option value="">通知先を選択</option>
                     {members.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
                   </select>
                 </div>
               </div>
-
-              <div className="flex gap-4 pt-4">
-                <button 
-                  type="submit"
-                  className={`flex-1 py-4 rounded-2xl text-white font-bold text-sm shadow-xl transition-all hover:-translate-y-1 active:scale-95 ${formData.posX !== null ? 'bg-orange-500 shadow-orange-100' : 'bg-blue-600 shadow-blue-100'}`}
-                >
-                  保存する
-                </button>
-              </div>
+              
+              <button type="submit" className={`w-full py-5 rounded-[2rem] text-white font-black text-lg shadow-2xl transition-all hover:-translate-y-1 active:scale-95 mt-4 ${formData.posX !== null ? 'bg-orange-500 shadow-orange-100' : 'bg-blue-600 shadow-blue-100'}`}>
+                SAVE STICKY NOTE
+              </button>
             </form>
           </div>
         </div>
